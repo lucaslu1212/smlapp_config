@@ -39,7 +39,7 @@ $branch = if ($env:SML_BRANCH) { $env:SML_BRANCH } else { "main" }
 $remote = if ($env:SML_REMOTE) { $env:SML_REMOTE } else { "origin" }
 
 if ($env:SML_SSH_KEY -and (Test-Path $env:SML_SSH_KEY)) {
-    $env:GIT_SSH_COMMAND = 'ssh -i "' + $env:SML_SSH_KEY + '" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new'
+    $env:GIT_SSH_COMMAND = 'ssh -i "' + $env:SML_SSH_KEY + '" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8'
 }
 
 Set-Location $RepoDir

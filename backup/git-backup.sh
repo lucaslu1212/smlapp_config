@@ -25,7 +25,7 @@ BRANCH="${SML_BRANCH:-main}"
 REMOTE="${SML_REMOTE:-origin}"
 
 if [ -n "${SML_SSH_KEY:-}" ] && [ -f "$SML_SSH_KEY" ]; then
-  export GIT_SSH_COMMAND="ssh -i \"$SML_SSH_KEY\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+  export GIT_SSH_COMMAND="ssh -i \"$SML_SSH_KEY\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8"
 fi
 
 cd "$REPO_DIR" || exit 1
