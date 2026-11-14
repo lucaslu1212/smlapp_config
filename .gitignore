@@ -1,3 +1,7 @@
+# 构建产物
+**/bin/
+**/obj/
+
 # 运行时数据中体积大/与机器相关的部分不进入 Git
 linux/data/screens/
 linux/data/events/

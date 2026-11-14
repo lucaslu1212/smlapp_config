@@ -1,0 +1,13 @@
+# 统一换行符：脚本在 Linux 上必须是 LF，否则会报 bad interpreter
+*.sh      text eol=lf
+*.py      text eol=lf
+*.service text eol=lf
+*.timer   text eol=lf
+
+*.ps1     text eol=crlf
+*.cs      text eol=crlf
+*.json    text eol=lf
+*.md      text eol=lf
+*.html    text eol=lf
+*.js      text eol=lf
+*.css     text eol=lf
