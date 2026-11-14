@@ -71,31 +71,28 @@ python sml_server.py
 
 ### 5.1 远程仓库
 
-远程地址暂时用 `git@12345` 占位，等真实仓库确定后替换：
+远程仓库：`git@github.com:lucaslu1212/smlapp_config.git`（私有，已推送）。如需更换：
 
 ```bash
 cd server
-git remote set-url origin git@<真实主机>:<组>/<仓库>.git
+git remote set-url origin git@<主机>:<组>/<仓库>.git
 ```
 
-> 仓库建议设为 **私有**：`data/` 里有账号哈希、设备令牌哈希、审计与审批记录。
+> 仓库建议保持 **私有**：`data/` 里有账号哈希、设备令牌哈希、审计与审批记录。
 
-### 5.2 认证（二选一）
+### 5.2 认证（三选一）
 
-**方式 A：ssh-agent（当前私钥带口令）**
+**方式 A：askpass（本机正在使用）**
 
-私钥 `C:\Users\Lucas\.ssh\id_rsa` 带口令，非交互推送需要先让 agent 载入一次：
+私钥 `C:\Users\Lucas\.ssh\id_rsa` 带口令，`backup.env` 中配置：
 
-```powershell
-# 管理员 PowerShell（只需一次）
-Set-Service ssh-agent -StartupType Automatic
-Start-Service ssh-agent
-
-# 当前用户（输入一次口令）
-ssh-add C:\Users\Lucas\.ssh\id_rsa
+```
+SML_ASKPASS=C:/Users/Lucas/.ssh/askpass-sml.sh
 ```
 
-之后计划任务以同一用户运行时可直接复用 agent。
+该脚本只输出口令（权限 600，不进 Git）。**注意路径必须用正斜杠**（部分 bash 的 `source` 会吞掉反斜杠）。
+
+> ⚠️ 明文口令落盘有风险。长期生产建议用方式 B。
 
 **方式 B：无口令部署密钥（推荐，长期无人值守）**
 
@@ -111,6 +108,19 @@ SML_SSH_KEY=/root/.ssh/sml_backup
 ```
 
 Windows 下为 `SML_SSH_KEY=C:/Users/Lucas/.ssh/sml_backup`。
+
+**方式 C：ssh-agent（与交互使用共用密钥）**
+
+```powershell
+# 管理员 PowerShell（只需一次）
+Set-Service ssh-agent -StartupType Automatic
+Start-Service ssh-agent
+
+# 当前用户（输入一次口令）
+ssh-add C:\Users\Lucas\.ssh\id_rsa
+```
+
+之后定时任务以同一用户运行时可直接复用 agent。
 
 > 请勿把口令写进脚本或仓库；`backup.env` 已被 `.gitignore` 排除。
 
@@ -170,8 +180,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File server\backup\git-backup.ps1
 
 | 现象 | 处理 |
 | --- | --- |
-| push 报 `Permission denied (publickey)` | agent 未载入密钥，或部署密钥未添加到仓库；见 5.2 |
-| push 报 `Could not resolve hostname 12345` | 仍在用占位地址；执行 `git remote set-url` 换真实地址 |
+| push 报 `Permission denied (publickey)` | askpass 路径无效（检查 `backup.env` 中 `SML_ASKPASS` 用正斜杠）或 key 未授权；见 5.2 |
+| push 网络超时 | 检查服务器到 GitHub 的连通性（443/22 端口）；失败仅记日志，不影响服务 |
 | 计划任务没有运行 | Windows 需当前用户登录；`schtasks /query /tn SmlServerGitBackup /v /fo list` 查看上次结果 |
 | 仓库太大 | 确认 `data/screens`、`data/events`、`certs` 被忽略；可 `git rm -r --cached` 后提交 |
 | 443 启动失败 | 端口被占用或权限不足；Linux 用 root/setcap，Windows 用管理员 |
