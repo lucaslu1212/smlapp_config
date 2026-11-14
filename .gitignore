@@ -1,0 +1,16 @@
+# 运行时数据中体积大/与机器相关的部分不进入 Git
+linux/data/screens/
+linux/data/events/
+linux/data-dev/
+linux/certs/
+linux/__pycache__/
+__pycache__/
+
+# 备份脚本的本地配置与日志
+backup/backup.env
+backup.log
+*.log
+
+# 临时文件
+*.tmp
+.probe/

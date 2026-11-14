@@ -1,0 +1,12 @@
+{
+  "httpsPort": 443,
+  "httpPort": 80,
+  "dataDir": "data",
+  "certFile": "certs/server.crt",
+  "keyFile": "certs/server.key",
+  "heartbeatTimeoutSeconds": 90,
+  "bootstrap": {
+    "adminUsername": "admin",
+    "adminPassword": "Admin@12345"
+  }
+}

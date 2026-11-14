@@ -1,0 +1,9 @@
+[Unit]
+Description=SmlApp server Git backup
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/sml-server
+ExecStart=/usr/bin/bash /opt/sml-server/backup/git-backup.sh
+User=root

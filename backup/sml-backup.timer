@@ -1,0 +1,11 @@
+[Unit]
+Description=Run SmlApp server Git backup every 30 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+Persistent=true
+Unit=sml-backup.service
+
+[Install]
+WantedBy=timers.target

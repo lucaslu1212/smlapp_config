@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>SmlServer</AssemblyName>
+    <RootNamespace>SmlServer</RootNamespace>
+    <Version>1.0.0</Version>
+    <Product>教室一体机管家 服务端</Product>
+    <Company>SML</Company>
+    <Copyright>© 2026 SML</Copyright>
+    <!-- 中文界面/日志，关闭不变全球化 -->
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <!-- 允许在更高版本运行时上运行（如本机只有 .NET 10，生产装 .NET 8 也可） -->
+    <RollForward>LatestMajor</RollForward>
+    <!-- .NET 9+ 将 X509Certificate2 构造函数标记过时，本项目目标 net8.0，使用该 API 是预期行为 -->
+    <NoWarn>$(NoWarn);SYSLIB0057</NoWarn>
+  </PropertyGroup>
+
+</Project>
