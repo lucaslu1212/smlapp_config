@@ -42,6 +42,14 @@ if ($env:SML_SSH_KEY -and (Test-Path $env:SML_SSH_KEY)) {
     $env:GIT_SSH_COMMAND = 'ssh -i "' + $env:SML_SSH_KEY + '" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8'
 }
 
+# 私钥带口令时，用 askpass 脚本非交互输入口令（脚本权限建议 600，不进入 Git）。
+# 更安全的长效方案是用无口令部署密钥或 ssh-agent，见 README 5.2。
+if ($env:SML_ASKPASS -and (Test-Path $env:SML_ASKPASS)) {
+    $env:SSH_ASKPASS = $env:SML_ASKPASS
+    $env:SSH_ASKPASS_REQUIRE = "force"
+    if (-not $env:DISPLAY) { $env:DISPLAY = "localhost:0" }
+}
+
 Set-Location $RepoDir
 
 # 防并发

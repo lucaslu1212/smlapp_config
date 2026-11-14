@@ -28,6 +28,14 @@ if [ -n "${SML_SSH_KEY:-}" ] && [ -f "$SML_SSH_KEY" ]; then
   export GIT_SSH_COMMAND="ssh -i \"$SML_SSH_KEY\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8"
 fi
 
+# 私钥带口令时，用 askpass 脚本非交互输入口令（脚本权限建议 600，不进入 Git）。
+# 更安全的长效方案是用无口令部署密钥或 ssh-agent，见 README 5.2。
+if [ -n "${SML_ASKPASS:-}" ] && [ -f "$SML_ASKPASS" ]; then
+  export SSH_ASKPASS="$SML_ASKPASS"
+  export SSH_ASKPASS_REQUIRE=force
+  export DISPLAY="${DISPLAY:-localhost:0}"
+fi
+
 cd "$REPO_DIR" || exit 1
 
 # 日志超过 1 MiB 时保留最近 500 行
