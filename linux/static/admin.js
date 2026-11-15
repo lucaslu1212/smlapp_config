@@ -12,19 +12,21 @@ let plans = [];
 async function api(path, options = {}) {
   const response = await fetch(path, {
     credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
     ...options,
+    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
   });
-
-  if (response.status === 401) {
-    showLogin();
-    throw new Error('AUTH');
-  }
 
   const text = await response.text();
   let data = null;
   if (text) {
     try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  }
+
+  // 登录接口的 401 是“账号或密码错误”，必须保留表单并显示错误；
+  // 其他接口的 401 才是会话失效，回登录页。
+  if (response.status === 401 && path !== '/api/auth/login') {
+    showLogin();
+    throw new Error('AUTH');
   }
 
   if (!response.ok) {
@@ -707,6 +709,7 @@ document.addEventListener('DOMContentLoaded', () => {
     event.preventDefault();
     $('loginError').textContent = '';
     $('loginBtn').disabled = true;
+    $('loginBtn').textContent = '登录中…';
 
     try {
       await api('/api/auth/login', {
@@ -718,9 +721,12 @@ document.addEventListener('DOMContentLoaded', () => {
       });
       await boot();
     } catch (error) {
-      $('loginError').textContent = error.message;
+      $('loginError').textContent = error.message === 'AUTH'
+        ? '登录已失效，请重新登录'
+        : (error.message || '登录失败');
     } finally {
       $('loginBtn').disabled = false;
+      $('loginBtn').textContent = '登录';
     }
   });
 
