@@ -81,7 +81,8 @@ function showApp() {
   $('app').hidden = false;
   const role = me.role === 'admin' ? '管理员' : me.role === 'org_admin' ? '组织管理员' : '教师';
   const org = me.role !== 'admin' && me.organizationName ? ` · ${me.organizationName}` : '';
-  $('currentUser').textContent = `${me.displayName} · ${role}${org}`;
+  const plan = me.plan ? ` · ${me.plan.activated ? me.plan.name : '试用版'}` : '';
+  $('currentUser').textContent = `${me.displayName} · ${role}${org}${plan}`;
 }
 
 async function boot() {

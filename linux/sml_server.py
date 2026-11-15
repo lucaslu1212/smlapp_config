@@ -46,6 +46,20 @@ ROLE_TEACHER = "teacher"
 ROLE_ORG_ADMIN = "org_admin"
 ROLE_ADMIN = "admin"
 
+# 套餐定义：未激活组织按 trial 额度；Key 可覆盖设备/教室上限与有效天数。
+PLAN_DEFINITIONS = [
+    {"code": "trial", "name": "试用版", "maxDevices": 2, "maxClassrooms": 1,
+     "durationDays": 0, "note": "未激活组织的默认额度"},
+    {"code": "basic", "name": "基础版", "maxDevices": 30, "maxClassrooms": 5,
+     "durationDays": 365, "note": "单校区小规模"},
+    {"code": "standard", "name": "标准版", "maxDevices": 100, "maxClassrooms": 20,
+     "durationDays": 365, "note": "多年级常规使用"},
+    {"code": "pro", "name": "专业版", "maxDevices": 300, "maxClassrooms": 50,
+     "durationDays": 365, "note": "全校部署"},
+]
+PLANS = {p["code"]: p for p in PLAN_DEFINITIONS}
+DEFAULT_KEY_VALID_DAYS = 90
+
 DOWNSTREAM = {
     "call.student", "message.show", "pc.lock", "pc.shutdown", "pc.restart",
     "pc.volume", "pc.screen", "policy.update", "client.kick", "ping",
@@ -155,6 +169,7 @@ class Store:
         "otps": "otps.json",
         "otp_usages": "otp-usages.json",
         "approvals": "approvals.json",
+        "activation_keys": "activation-keys.json",
     }
 
     def __init__(self, data_dir, bootstrap):
@@ -167,6 +182,7 @@ class Store:
         self.otps = []
         self.otp_usages = []
         self.approvals = []
+        self.activation_keys = []
 
     def load(self):
         os.makedirs(self.dir, exist_ok=True)
@@ -912,6 +928,127 @@ def can_manage_user(actor, target, store):
     return bool(org_rooms & set(target.get("classroomIds") or []))
 
 
+# ============================================================ 套餐与激活码
+
+def new_activation_key():
+    alphabet = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
+    groups = ["".join(secrets.choice(alphabet) for _ in range(4)) for _ in range(4)]
+    return "SML-" + "-".join(groups)
+
+
+def normalize_key(value):
+    return "".join(ch for ch in (value or "") if ch.isalnum()).upper()
+
+
+def hash_key(value):
+    return sha256_hex(normalize_key(value))
+
+
+def plan_summary(store, org):
+    now = now_ms()
+    plan = (org or {}).get("plan") or {}
+
+    if plan.get("code") in PLANS:
+        base = PLANS[plan["code"]]
+        expires_at = int(plan.get("expiresAt") or 0)
+        active = expires_at <= 0 or expires_at > now
+        code = plan["code"]
+        name = plan.get("name") or base["name"]
+        max_devices = int(plan.get("maxDevices") or base["maxDevices"])
+        max_classrooms = int(plan.get("maxClassrooms") or base["maxClassrooms"])
+        activated = True
+    else:
+        base = PLANS["trial"]
+        expires_at = 0
+        active = True
+        code = "trial"
+        name = base["name"]
+        max_devices = base["maxDevices"]
+        max_classrooms = base["maxClassrooms"]
+        activated = False
+
+    org_id = (org or {}).get("id")
+    device_count = sum(1 for d in store.devices if d.get("organizationId") == org_id) if org else 0
+    classroom_count = sum(1 for c in store.classrooms if c.get("organizationId") == org_id) if org else 0
+
+    remaining_days = 0
+    if expires_at:
+        remaining_days = max(0, int((expires_at - now) / 86400000))
+
+    return {
+        "code": code,
+        "name": name,
+        "activated": activated,
+        "active": active,
+        "expiresAt": expires_at,
+        "maxDevices": max_devices,
+        "maxClassrooms": max_classrooms,
+        "usedDevices": device_count,
+        "usedClassrooms": classroom_count,
+        "remainingDays": remaining_days,
+    }
+
+
+def quota_error(store, org, kind):
+    plan = plan_summary(store, org)
+
+    if kind == "device" and plan["usedDevices"] >= plan["maxDevices"]:
+        if not plan["activated"]:
+            return f"试用版最多 {plan['maxDevices']} 台设备，请在「套餐」中激活"
+        if not plan["active"]:
+            return "套餐已过期，请激活新套餐后再添加设备"
+        return f"当前套餐最多 {plan['maxDevices']} 台设备，请升级套餐"
+
+    if kind == "classroom" and plan["usedClassrooms"] >= plan["maxClassrooms"]:
+        if not plan["activated"]:
+            return f"试用版最多 {plan['maxClassrooms']} 个教室，请在「套餐」中激活"
+        if not plan["active"]:
+            return "套餐已过期，请激活新套餐后再添加教室"
+        return f"当前套餐最多 {plan['maxClassrooms']} 个教室，请升级套餐"
+
+    return None
+
+
+def activate_organization(store, org, key_plain, actor):
+    normalized = normalize_key(key_plain)
+    if len(normalized) != 19 or not normalized.startswith("SML"):
+        return None, "激活码格式不正确（应为 SML-XXXX-XXXX-XXXX-XXXX）"
+
+    digest = hash_key(key_plain)
+    record = next((k for k in store.activation_keys if k.get("keyHash") == digest), None)
+    if record is None:
+        return None, "激活码无效"
+    if record.get("revoked"):
+        return None, "激活码已被吊销"
+    if record.get("usedAt"):
+        return None, "激活码已被使用"
+    if record.get("expiresAt") and record["expiresAt"] <= now_ms():
+        return None, "激活码已过期"
+
+    plan_code = record.get("planCode") or "basic"
+    base = PLANS.get(plan_code, PLANS["basic"])
+    duration_days = int(record.get("durationDays") or base["durationDays"] or 365)
+    expires_at = now_ms() + duration_days * 86400000 if duration_days > 0 else 0
+
+    org["plan"] = {
+        "code": plan_code,
+        "name": base["name"],
+        "maxDevices": int(record.get("maxDevices") or base["maxDevices"]),
+        "maxClassrooms": int(record.get("maxClassrooms") or base["maxClassrooms"]),
+        "activatedAt": now_ms(),
+        "expiresAt": expires_at,
+        "keyId": record["keyId"],
+    }
+
+    record["usedAt"] = now_ms()
+    record["usedBy"] = actor["username"]
+    record["organizationId"] = org["id"]
+    record["organizationName"] = org["name"]
+    store.save()
+
+    return plan_summary(store, org), None
+
+
 def resolve_scope(user, classroom_id, store=None):
     cid = (classroom_id or "").strip()
 
@@ -942,6 +1079,10 @@ def resolve_scope(user, classroom_id, store=None):
 
 def public_user(user, store=None):
     organization_id = user.get("organizationId") or ""
+    plan = None
+    if store and organization_id:
+        plan = plan_summary(store, store.organization(organization_id))
+
     return {
         "id": user["id"],
         "username": user["username"],
@@ -949,6 +1090,7 @@ def public_user(user, store=None):
         "role": user.get("role"),
         "organizationId": organization_id,
         "organizationName": store.organization_name(organization_id) if (store and organization_id) else "",
+        "plan": plan,
         "classroomIds": user.get("classroomIds") or [],
         "lastLoginAt": user.get("lastLoginAt", 0),
     }
@@ -1075,7 +1217,7 @@ async def route(method, target, headers, body, ctx):
         return error_response("未登录", 401)
 
     if path == "/api/auth/me" and method == "GET":
-        return json_response(public_user(user, store))
+        return json_response(public_user(user, ctx.store))
 
     store = ctx.store
 
@@ -1203,6 +1345,140 @@ async def route(method, target, headers, body, ctx):
     if path.startswith("/api/admin/") and not (is_admin(user) or is_org_admin(user)):
         return error_response("需要管理员权限", 403)
 
+    # ---- 套餐与激活码 ----
+    if path == "/api/admin/plans" and method == "GET":
+        return json_response(PLAN_DEFINITIONS)
+
+    if path == "/api/admin/keys" and method == "GET":
+        if not is_admin(user):
+            return error_response("需要全局管理员权限", 403)
+
+        now = now_ms()
+        items = []
+        for key in sorted(store.activation_keys, key=lambda k: k.get("createdAt", 0), reverse=True):
+            if key.get("revoked"):
+                status = "revoked"
+            elif key.get("usedAt"):
+                status = "used"
+            elif key.get("expiresAt") and key["expiresAt"] <= now:
+                status = "expired"
+            else:
+                status = "unused"
+
+            base = PLANS.get(key.get("planCode"), PLANS["basic"])
+            items.append({
+                "keyId": key["keyId"],
+                "keyHint": key.get("keyHint", ""),
+                "planCode": key.get("planCode"),
+                "planName": base["name"],
+                "maxDevices": key.get("maxDevices") or base["maxDevices"],
+                "maxClassrooms": key.get("maxClassrooms") or base["maxClassrooms"],
+                "durationDays": key.get("durationDays") or base["durationDays"],
+                "status": status,
+                "note": key.get("note"),
+                "createdAt": key.get("createdAt", 0),
+                "expiresAt": key.get("expiresAt", 0),
+                "usedAt": key.get("usedAt", 0),
+                "usedBy": key.get("usedBy", ""),
+                "organizationId": key.get("organizationId", ""),
+                "organizationName": key.get("organizationName", ""),
+            })
+        return json_response(items[:200])
+
+    if path == "/api/admin/keys" and method == "POST":
+        if not is_admin(user):
+            return error_response("需要全局管理员权限", 403)
+
+        payload = parse_body(body)
+        count = max(1, min(50, int(payload.get("count", 1) or 1)))
+        plan_code = str(payload.get("planCode") or "basic")
+
+        if plan_code not in PLANS or plan_code == "trial":
+            return error_response("套餐不存在（trial 不能用于激活码）")
+
+        base = PLANS[plan_code]
+        max_devices = int(payload.get("maxDevices") or base["maxDevices"])
+        max_classrooms = int(payload.get("maxClassrooms") or base["maxClassrooms"])
+        duration_days = int(payload.get("durationDays") or base["durationDays"])
+        valid_days = int(payload.get("validDays", DEFAULT_KEY_VALID_DAYS) or 0)
+        note = payload.get("note") or ""
+
+        if max_devices < 1 or max_classrooms < 1:
+            return error_response("设备/教室上限必须大于 0")
+        if duration_days < 0 or valid_days < 0:
+            return error_response("有效天数不能为负数")
+
+        expires_at = now_ms() + valid_days * 86400000 if valid_days > 0 else 0
+        created = []
+
+        for _ in range(count):
+            plain = new_activation_key()
+            record = {
+                "keyId": "key_" + secrets.token_hex(6),
+                "keyHash": hash_key(plain),
+                "keyHint": plain[:7] + "…" + plain[-4:],
+                "planCode": plan_code,
+                "maxDevices": max_devices,
+                "maxClassrooms": max_classrooms,
+                "durationDays": duration_days,
+                "createdAt": now_ms(),
+                "createdBy": user["username"],
+                "expiresAt": expires_at,
+                "note": note,
+                "revoked": False,
+                "usedAt": 0,
+                "usedBy": "",
+                "organizationId": "",
+                "organizationName": "",
+            }
+            store.activation_keys.append(record)
+            created.append({"keyId": record["keyId"], "key": plain})
+
+        store.save()
+        ctx.audit.write(user["username"], user.get("role"), "key.create", plan_code,
+                        f"生成 {count} 个激活码（{base['name']}，{duration_days} 天）", "")
+        return json_response({
+            "keys": created,
+            "expiresAt": expires_at,
+            "message": "激活码只显示这一次，请立即复制保存",
+        })
+
+    match = re.fullmatch(r"/api/admin/keys/([^/]+)/revoke", path)
+    if match and method == "POST":
+        if not is_admin(user):
+            return error_response("需要全局管理员权限", 403)
+
+        record = next((k for k in store.activation_keys if k["keyId"] == match.group(1)), None)
+        if not record:
+            return error_response("激活码不存在", 404)
+        if record.get("usedAt"):
+            return error_response("已使用的激活码不能吊销")
+        record["revoked"] = True
+        store.save()
+        ctx.audit.write(user["username"], user.get("role"), "key.revoke", record["keyId"], "吊销激活码", "")
+        return json_response({"ok": True})
+
+    match = re.fullmatch(r"/api/admin/organizations/([^/]+)/activate", path)
+    if match and method == "POST":
+        org = store.organization(match.group(1))
+        if not org:
+            return error_response("组织不存在", 404)
+        if not is_admin(user) and user.get("organizationId") != org["id"]:
+            return error_response("无权激活该组织", 403)
+
+        payload = parse_body(body)
+        key_plain = str(payload.get("key") or "")
+        if not key_plain:
+            return error_response("请输入激活码")
+
+        summary, error = activate_organization(store, org, key_plain, user)
+        if error:
+            return error_response(error, 400)
+
+        ctx.audit.write(user["username"], user.get("role"), "organization.activate", org["id"],
+                        f"激活套餐 {summary['name']}，到期 {summary['expiresAt']}", "")
+        return json_response({"ok": True, "plan": summary, "organizationName": org["name"]})
+
     # ---- 组织（仅全局 admin） ----
     if path == "/api/admin/organizations" and method == "GET":
         if not is_admin(user):
@@ -1219,6 +1495,7 @@ async def route(method, target, headers, body, ctx):
                 "deviceCount": len(devices),
                 "onlineCount": sum(1 for d in devices if ctx.connections.online(d["deviceId"])),
                 "userCount": len(members),
+                "plan": plan_summary(store, org),
             })
         return json_response(items)
 
@@ -1346,6 +1623,9 @@ async def route(method, target, headers, body, ctx):
             "dataDir": store.dir,
             "startedAt": ctx.started_at,
             "version": "1.0.0",
+            "organizationId": user.get("organizationId") or "",
+            "organizationName": store.organization_name(user.get("organizationId")) if user.get("organizationId") else "",
+            "plan": plan_summary(store, store.organization(user.get("organizationId"))) if user.get("organizationId") else None,
             "certificate": {
                 "subject": ctx.cert_subject,
                 "thumbprint": "-",
@@ -1470,10 +1750,15 @@ async def route(method, target, headers, body, ctx):
         if not organization_id:
             organization_id = store.organizations[0]["id"] if store.organizations else ""
 
-        if not store.organization(organization_id):
+        org = store.organization(organization_id)
+        if not org:
             return error_response("组织不存在")
         if not is_admin(user) and organization_id != user.get("organizationId"):
             return error_response("无权操作该组织", 403)
+
+        quota = quota_error(store, org, "classroom")
+        if quota:
+            return error_response(quota, 402)
 
         record = {
             "id": "cls-" + secrets.token_hex(3),
@@ -1873,6 +2158,10 @@ def handle_create_device(body, user, ctx):
         return error_response("教室不存在")
     if not can_manage_classroom(user, classroom, ctx.store):
         return error_response("无权操作该教室", 403)
+
+    quota = quota_error(ctx.store, ctx.store.organization(classroom.get("organizationId", "")), "device")
+    if quota:
+        return error_response(quota, 402)
 
     device_id = secrets.token_hex(16)
     token = new_token()

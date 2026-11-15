@@ -5,6 +5,7 @@ const $ = id => document.getElementById(id);
 let me = null;
 let classrooms = [];
 let organizations = [];
+let plans = [];
 
 /* ---------------- 通用 ---------------- */
 
@@ -87,7 +88,9 @@ async function boot() {
     $('app').hidden = false;
     $('currentUser').textContent = `${me.displayName} · ${isOrgAdmin ? '组织管理员' : '全局管理员'}`;
     $('orgBadge').hidden = false;
-    $('orgBadge').textContent = isOrgAdmin ? (me.organizationName || '未分配组织') : '全局';
+    $('orgBadge').textContent = isOrgAdmin
+      ? `${me.organizationName || '未分配组织'} · ${me.plan ? me.plan.name : '试用版'}`
+      : '全局';
 
     if (isOrgAdmin) {
       const orgTab = document.querySelector('[data-tab="organizations"]');
@@ -101,10 +104,13 @@ async function boot() {
     $('auditDate').value = new Date().toISOString().slice(0, 10);
 
     if (!isOrgAdmin) await loadOrganizations();
+    await loadPlans();
     await loadClassrooms();
     await loadOverview();
     await loadDevices();
     await loadUsers();
+    await loadPlanTab();
+    if (!isOrgAdmin) await loadKeys();
   } catch (error) {
     if (error.message !== 'AUTH') {
       console.error(error);
@@ -153,19 +159,39 @@ async function loadOrganizations() {
   if ($('newClassroomOrg')) $('newClassroomOrg').innerHTML = options;
   if ($('newUserOrg')) $('newUserOrg').innerHTML = options;
 
+  const planBadge = o => {
+    const plan = o.plan;
+    if (!plan || !plan.activated) return '<span class="badge warn">试用</span>';
+    if (!plan.active) return '<span class="badge danger">已过期</span>';
+    return `<span class="badge on">${esc(plan.name)}</span>`;
+  };
+
   $('orgTable').querySelector('tbody').innerHTML = organizations.length
     ? organizations.map(o => `
       <tr>
         <td>${esc(o.name)}</td>
+        <td>${planBadge(o)}</td>
         <td class="mono">${esc(o.id)}</td>
         <td>${o.classroomCount}</td>
         <td>${o.deviceCount}</td>
         <td>${o.onlineCount}</td>
         <td>${o.userCount}</td>
         <td class="nowrap">${fmtTime(o.createdAt)}</td>
-        <td class="right"><button class="btn sm danger" data-del-org="${esc(o.id)}">删除</button></td>
+        <td class="right nowrap">
+          <button class="btn sm" data-activate-org="${esc(o.id)}">激活</button>
+          <button class="btn sm danger" data-del-org="${esc(o.id)}">删除</button>
+        </td>
       </tr>`).join('')
-    : '<tr><td colspan="8" class="muted">暂无组织</td></tr>';
+    : '<tr><td colspan="9" class="muted">暂无组织</td></tr>';
+
+  $('orgTable').querySelectorAll('[data-activate-org]').forEach(button => {
+    button.onclick = () => {
+      const org = organizations.find(o => o.id === button.dataset.activateOrg);
+      if (!org) return;
+      const key = window.prompt(`为「${org.name}」输入激活码：\n（形如 SML-XXXX-XXXX-XXXX-XXXX）`);
+      if (key) activateOrganization(org.id, key);
+    };
+  });
 
   $('orgTable').querySelectorAll('[data-del-org]').forEach(button => {
     button.onclick = async () => {
@@ -217,6 +243,173 @@ async function createOrganization() {
     await loadClassrooms();
     await loadOverview();
     await loadUsers();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+/* ---------------- 套餐与激活码 ---------------- */
+
+async function loadPlans() {
+  plans = await api('/api/admin/plans');
+
+  if ($('newKeyPlan')) {
+    $('newKeyPlan').innerHTML = plans
+      .filter(p => p.code !== 'trial')
+      .map(p => `<option value="${esc(p.code)}">${esc(p.name)}（${p.maxDevices} 设备 / ${p.maxClassrooms} 教室）</option>`)
+      .join('');
+  }
+
+  if ($('planTable')) {
+    $('planTable').querySelector('tbody').innerHTML = plans.map(p => `
+      <tr>
+        <td>${esc(p.name)}</td>
+        <td>${p.maxDevices}</td>
+        <td>${p.maxClassrooms}</td>
+        <td>${p.durationDays ? p.durationDays + ' 天' : '永久'}</td>
+        <td>${esc(p.note || '')}</td>
+      </tr>`).join('');
+  }
+}
+
+async function loadPlanTab() {
+  if (!me) return;
+
+  const isOrgAdmin = me.role === 'org_admin';
+  $('keyAdmin').hidden = !(me.role === 'admin');
+  $('activateCard').hidden = !isOrgAdmin;
+
+  if (!isOrgAdmin) {
+    $('planCurrentCard').hidden = false;
+    $('planOrgName').textContent = '全局管理员';
+    $('planStats').innerHTML = '';
+    $('planInfo').innerHTML =
+      '<div class="k">说明</div><div class="v">全局管理员不受套餐限制；套餐用于各组织，可在「组织」中为组织激活。</div>';
+    return;
+  }
+
+  const plan = me.plan;
+  $('planOrgName').textContent = me.organizationName || '';
+
+  $('planStats').innerHTML = plan ? [
+    stat('套餐', plan.activated ? plan.name : '试用版'),
+    stat('设备用量', `${plan.usedDevices}/${plan.maxDevices}`),
+    stat('教室用量', `${plan.usedClassrooms}/${plan.maxClassrooms}`),
+  ].join('') : '';
+
+  let statusText;
+  if (!plan || !plan.activated) {
+    statusText = '<span class="badge warn">未激活（试用版）</span>';
+  } else if (!plan.active) {
+    statusText = '<span class="badge danger">已过期</span>';
+  } else {
+    statusText = '<span class="badge on">生效中</span>';
+  }
+
+  $('planInfo').innerHTML = [
+    kv('状态', statusText),
+    kv('到期时间', plan && plan.expiresAt ? fmtTime(plan.expiresAt) : '—'),
+    kv('剩余天数', plan && plan.expiresAt ? plan.remainingDays + ' 天' : '—'),
+    kv('设备上限', plan ? plan.maxDevices : '—'),
+    kv('教室上限', plan ? plan.maxClassrooms : '—'),
+  ].join('');
+}
+
+async function loadKeys() {
+  if (!me || me.role !== 'admin') return;
+
+  const list = await api('/api/admin/keys');
+  const badge = status => ({
+    unused: '<span class="badge on">未使用</span>',
+    used: '<span class="badge">已使用</span>',
+    revoked: '<span class="badge danger">已吊销</span>',
+    expired: '<span class="badge warn">已过期</span>',
+  }[status] || esc(status));
+
+  $('keyTable').querySelector('tbody').innerHTML = list.length
+    ? list.map(k => `
+      <tr>
+        <td class="mono">${esc(k.keyHint)}</td>
+        <td>${esc(k.planName)}</td>
+        <td class="nowrap">${k.maxDevices} 设备 / ${k.maxClassrooms} 教室<br><span class="muted">${k.durationDays ? k.durationDays + ' 天' : '永久'}</span></td>
+        <td>${badge(k.status)}</td>
+        <td class="nowrap">${fmtTime(k.createdAt)}</td>
+        <td class="nowrap">${k.usedAt ? fmtTime(k.usedAt) + '<br><span class="muted">' + esc(k.organizationName || k.usedBy) + '</span>' : '—'}</td>
+        <td class="nowrap">${k.expiresAt ? fmtTime(k.expiresAt) : '永久'}</td>
+        <td class="right">${k.status === 'unused' ? `<button class="btn sm danger" data-revoke-key="${esc(k.keyId)}">吊销</button>` : ''}</td>
+      </tr>`).join('')
+    : '<tr><td colspan="8" class="muted">暂无激活码</td></tr>';
+
+  $('keyTable').querySelectorAll('[data-revoke-key]').forEach(button => {
+    button.onclick = async () => {
+      if (!confirm('吊销该激活码？吊销后无法再用于激活。')) return;
+      try {
+        await api(`/api/admin/keys/${encodeURIComponent(button.dataset.revokeKey)}/revoke`, { method: 'POST' });
+        toast('已吊销');
+        await loadKeys();
+      } catch (error) {
+        toast(error.message, true);
+      }
+    };
+  });
+}
+
+async function createKeys() {
+  const count = Math.max(1, Math.min(50, parseInt($('newKeyCount').value, 10) || 1));
+  const planCode = $('newKeyPlan').value;
+  const maxDevices = parseInt($('newKeyDevices').value, 10);
+  const maxClassrooms = parseInt($('newKeyRooms').value, 10);
+  const durationDays = parseInt($('newKeyDuration').value, 10);
+  const validDays = parseInt($('newKeyValid').value, 10);
+  const note = ($('newKeyNote').value || '').trim();
+
+  try {
+    const result = await api('/api/admin/keys', {
+      method: 'POST',
+      body: JSON.stringify({
+        count,
+        planCode,
+        maxDevices: Number.isFinite(maxDevices) ? maxDevices : undefined,
+        maxClassrooms: Number.isFinite(maxClassrooms) ? maxClassrooms : undefined,
+        durationDays: Number.isFinite(durationDays) ? durationDays : undefined,
+        validDays: Number.isFinite(validDays) ? validDays : undefined,
+        note,
+      }),
+    });
+
+    $('newKeyResult').hidden = false;
+    $('newKeyResult').innerHTML = `
+      <div class="token-box">
+        <div class="label">激活码（只显示这一次，请立即复制保存）：</div>
+        ${result.keys.map(k => esc(k.key)).join('<br>')}
+      </div>`;
+
+    $('newKeyNote').value = '';
+    await loadKeys();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+async function activateOrganization(orgId, keyOverride) {
+  const key = (keyOverride || $('activateKey').value || '').trim();
+  if (!key) { toast('请输入激活码', true); return; }
+
+  try {
+    const result = await api(`/api/admin/organizations/${encodeURIComponent(orgId)}/activate`, {
+      method: 'POST',
+      body: JSON.stringify({ key }),
+    });
+
+    toast(`已激活：${result.plan.name}（剩余 ${result.plan.remainingDays} 天）`);
+    $('activateKey').value = '';
+    me = await api('/api/auth/me');
+    await loadPlanTab();
+    await loadOverview();
+    if (me.role === 'admin') {
+      await loadOrganizations();
+      await loadKeys();
+    }
   } catch (error) {
     toast(error.message, true);
   }
@@ -548,6 +741,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (name === 'overview') await loadOverview();
         if (name === 'devices') await loadDevices();
         if (name === 'organizations') await loadOrganizations();
+        if (name === 'plan') {
+          await loadPlanTab();
+          if (me.role === 'admin') await loadKeys();
+        }
         if (name === 'classrooms') await loadClassrooms();
         if (name === 'users') { await loadClassrooms(); await loadUsers(); }
         if (name === 'audit') await loadAudit();
@@ -559,6 +756,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
   $('createDeviceBtn').onclick = createDevice;
   $('createOrgBtn').onclick = createOrganization;
+  $('createKeyBtn').onclick = createKeys;
+  $('activateBtn').onclick = () => {
+    if (me && me.role === 'org_admin' && me.organizationId) {
+      activateOrganization(me.organizationId);
+    } else {
+      toast('请在组织列表中为组织激活', true);
+    }
+  };
   $('createClassroomBtn').onclick = async () => {
     const name = ($('newClassroomName').value || '').trim();
     if (!name) { toast('请填写教室名称', true); return; }

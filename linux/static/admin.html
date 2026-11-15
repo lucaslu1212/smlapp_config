@@ -43,6 +43,7 @@
       <div class="tab active" data-tab="overview">总览</div>
       <div class="tab" data-tab="devices">设备</div>
       <div class="tab" data-tab="organizations">组织</div>
+      <div class="tab" data-tab="plan">套餐</div>
       <div class="tab" data-tab="classrooms">教室</div>
       <div class="tab" data-tab="users">账号</div>
       <div class="tab" data-tab="audit">审计</div>
@@ -132,8 +133,74 @@
         <div style="overflow:auto">
           <table class="table" id="orgTable">
             <thead>
-              <tr><th>名称</th><th>ID</th><th>教室</th><th>设备</th><th>在线</th><th>账号</th><th>创建时间</th><th class="right">操作</th></tr>
+              <tr><th>名称</th><th>套餐</th><th>ID</th><th>教室</th><th>设备</th><th>在线</th><th>账号</th><th>创建时间</th><th class="right">操作</th></tr>
             </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 套餐 -->
+    <section id="tab-plan" hidden>
+      <div class="card" id="planCurrentCard">
+        <h2>当前套餐 <span class="hint" id="planOrgName"></span></h2>
+        <div class="grid3" id="planStats"></div>
+        <div class="kv" id="planInfo" style="margin-top:14px"></div>
+      </div>
+
+      <div class="card" id="activateCard">
+        <h2>激活 / 续期 <span class="hint">激活码由网站拥有者发布</span></h2>
+        <div class="field">
+          <label>激活码</label>
+          <input type="text" id="activateKey" placeholder="SML-XXXX-XXXX-XXXX-XXXX" maxlength="30">
+        </div>
+        <div class="row right">
+          <button class="btn primary" id="activateBtn">激活</button>
+        </div>
+        <p class="small muted" style="margin:12px 0 0;line-height:1.8">
+          每个激活码只能使用一次；激活后套餐立即生效，设备/教室上限按激活码调整。
+          已有设备在套餐过期后仍可管理，但不能新增设备或教室。
+        </p>
+      </div>
+
+      <div id="keyAdmin" hidden>
+        <div class="card">
+          <h2>发布激活码 <span class="hint">明文只显示一次</span></h2>
+          <div class="grid3">
+            <div class="field"><label>数量（1-50）</label><input type="number" id="newKeyCount" value="1" min="1" max="50"></div>
+            <div class="field"><label>套餐</label><select id="newKeyPlan"></select></div>
+            <div class="field"><label>激活后有效天数</label><input type="number" id="newKeyDuration" placeholder="默认按套餐"></div>
+            <div class="field"><label>设备上限</label><input type="number" id="newKeyDevices" placeholder="默认按套餐"></div>
+            <div class="field"><label>教室上限</label><input type="number" id="newKeyRooms" placeholder="默认按套餐"></div>
+            <div class="field"><label>激活码自身有效天数</label><input type="number" id="newKeyValid" value="90"></div>
+          </div>
+          <div class="field">
+            <label>备注（仅后台可见）</label>
+            <input type="text" id="newKeyNote" placeholder="例如：XX 中学 2026 年采购" maxlength="80">
+          </div>
+          <div class="row right">
+            <button class="btn primary" id="createKeyBtn">生成激活码</button>
+          </div>
+          <div id="newKeyResult" hidden></div>
+        </div>
+
+        <div class="card">
+          <h2>激活码列表</h2>
+          <div style="overflow:auto">
+            <table class="table" id="keyTable">
+              <thead>
+                <tr><th>激活码</th><th>套餐</th><th>上限</th><th>状态</th><th>创建</th><th>使用</th><th>自身有效期</th><th class="right">操作</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>套餐定义</h2>
+          <table class="table" id="planTable">
+            <thead><tr><th>套餐</th><th>设备上限</th><th>教室上限</th><th>默认有效期</th><th>说明</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
