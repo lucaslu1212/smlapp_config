@@ -791,7 +791,15 @@ def serve_static(path):
 # ============================================================ 认证与权限
 
 def current_user(ctx, headers):
-    token = parse_cookies(headers.get("cookie", "")).get(COOKIE_NAME)
+    # 同时支持：Web 的 Cookie，以及小程序/客户端的 Authorization: Bearer <token>
+    token = None
+    authorization = headers.get("authorization", "")
+    if authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+
+    if not token:
+        token = parse_cookies(headers.get("cookie", "")).get(COOKIE_NAME)
+
     if not token:
         return None
     user_id = ctx.sessions.get(token)
@@ -1328,7 +1336,7 @@ def handle_login(body, ctx, headers):
     ctx.store.save()
     ctx.audit.write(user["username"], user.get("role"), "auth.login", user["username"], None, ip)
 
-    return 200, "application/json; charset=utf-8", dumps(public_user(user)), [
+    return 200, "application/json; charset=utf-8", dumps({**public_user(user), "token": token}), [
         ("Set-Cookie", f"{COOKIE_NAME}={token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800")
     ]
 
