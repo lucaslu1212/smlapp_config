@@ -4,6 +4,7 @@ const $ = id => document.getElementById(id);
 
 let me = null;
 let classrooms = [];
+let organizations = [];
 
 /* ---------------- 通用 ---------------- */
 
@@ -74,17 +75,32 @@ function showLogin() {
 async function boot() {
   try {
     me = await api('/api/auth/me');
-    if (me.role !== 'admin') {
-      toast('该账号不是管理员，无法进入后台', true);
+    if (me.role !== 'admin' && me.role !== 'org_admin') {
+      toast('该账号没有后台权限', true);
       showLogin();
       return;
     }
 
+    const isOrgAdmin = me.role === 'org_admin';
+
     $('login').hidden = true;
     $('app').hidden = false;
-    $('currentUser').textContent = `${me.displayName} · 管理员`;
+    $('currentUser').textContent = `${me.displayName} · ${isOrgAdmin ? '组织管理员' : '全局管理员'}`;
+    $('orgBadge').hidden = false;
+    $('orgBadge').textContent = isOrgAdmin ? (me.organizationName || '未分配组织') : '全局';
+
+    if (isOrgAdmin) {
+      const orgTab = document.querySelector('[data-tab="organizations"]');
+      if (orgTab) orgTab.style.display = 'none';
+      $('newClassroomOrgField').hidden = true;
+      $('newUserOrgField').hidden = true;
+      $('newUserRole').innerHTML = '<option value="teacher">教师（仅本组织设备）</option>';
+      $('newUserRole').disabled = true;
+    }
 
     $('auditDate').value = new Date().toISOString().slice(0, 10);
+
+    if (!isOrgAdmin) await loadOrganizations();
     await loadClassrooms();
     await loadOverview();
     await loadDevices();
@@ -102,14 +118,16 @@ async function boot() {
 async function loadOverview() {
   const data = await api('/api/admin/overview');
 
-  $('statGrid').innerHTML = [
+  const stats = [
     stat('在线设备', data.onlineDevices),
     stat('设备总数', data.totalDevices),
     stat('账号', data.users),
     stat('待审批', data.pendingApprovals),
     stat('可用一次性密码', data.availableOtp),
     stat('教室', data.classrooms),
-  ].join('');
+  ];
+  if (me && me.role === 'admin') stats.splice(2, 0, stat('组织', data.organizations));
+  $('statGrid').innerHTML = stats.join('');
 
   $('serverBadge').className = 'badge on';
   $('serverBadge').textContent = `HTTPS ${data.httpsPort} · v${data.version}`;
@@ -126,12 +144,91 @@ async function loadOverview() {
   ].join('');
 }
 
+/* ---------------- 组织 ---------------- */
+
+async function loadOrganizations() {
+  organizations = await api('/api/admin/organizations');
+
+  const options = organizations.map(o => `<option value="${esc(o.id)}">${esc(o.name)}</option>`).join('');
+  if ($('newClassroomOrg')) $('newClassroomOrg').innerHTML = options;
+  if ($('newUserOrg')) $('newUserOrg').innerHTML = options;
+
+  $('orgTable').querySelector('tbody').innerHTML = organizations.length
+    ? organizations.map(o => `
+      <tr>
+        <td>${esc(o.name)}</td>
+        <td class="mono">${esc(o.id)}</td>
+        <td>${o.classroomCount}</td>
+        <td>${o.deviceCount}</td>
+        <td>${o.onlineCount}</td>
+        <td>${o.userCount}</td>
+        <td class="nowrap">${fmtTime(o.createdAt)}</td>
+        <td class="right"><button class="btn sm danger" data-del-org="${esc(o.id)}">删除</button></td>
+      </tr>`).join('')
+    : '<tr><td colspan="8" class="muted">暂无组织</td></tr>';
+
+  $('orgTable').querySelectorAll('[data-del-org]').forEach(button => {
+    button.onclick = async () => {
+      if (!confirm('删除该组织？组织下还有教室或账号时会被拒绝。')) return;
+      try {
+        await api(`/api/admin/organizations/${encodeURIComponent(button.dataset.delOrg)}`, { method: 'DELETE' });
+        toast('已删除');
+        await loadOrganizations();
+        await loadOverview();
+      } catch (error) {
+        toast(error.message, true);
+      }
+    };
+  });
+}
+
+async function createOrganization() {
+  const name = ($('newOrgName').value || '').trim();
+  if (!name) { toast('请填写组织名称', true); return; }
+
+  const adminUsername = ($('newOrgAdminUser').value || '').trim();
+  const adminPassword = ($('newOrgAdminPass').value || '').trim();
+
+  try {
+    const result = await api('/api/admin/organizations', {
+      method: 'POST',
+      body: JSON.stringify({
+        name,
+        note: ($('newOrgNote').value || '').trim(),
+        adminUsername,
+        adminPassword,
+      }),
+    });
+
+    $('newOrgResult').hidden = false;
+    $('newOrgResult').innerHTML = `
+      <div class="token-box">
+        <div class="label">组织已创建，管理员账号（密码只显示这一次）：</div>
+        用户名：${esc(result.admin.username)}<br>
+        密码：${esc(result.admin.password)}
+      </div>`;
+
+    $('newOrgName').value = '';
+    $('newOrgNote').value = '';
+    $('newOrgAdminUser').value = '';
+    $('newOrgAdminPass').value = '';
+
+    await loadOrganizations();
+    await loadClassrooms();
+    await loadOverview();
+    await loadUsers();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
 /* ---------------- 教室 ---------------- */
 
 async function loadClassrooms() {
   classrooms = await api('/api/admin/classrooms');
 
-  const options = classrooms.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('');
+  const labelOf = c => (c.organizationName ? c.organizationName + ' / ' : '') + c.name;
+  const options = classrooms.map(c => `<option value="${esc(c.id)}">${esc(labelOf(c))}</option>`).join('');
   $('newDeviceClassroom').innerHTML = options;
   $('newUserClassrooms').innerHTML = options;
 
@@ -139,13 +236,14 @@ async function loadClassrooms() {
     ? classrooms.map(c => `
       <tr>
         <td>${esc(c.name)}</td>
+        <td>${esc(c.organizationName || '—')}</td>
         <td class="mono">${esc(c.id)}</td>
         <td>${c.deviceCount}</td>
         <td>${c.onlineCount}</td>
         <td>${esc(c.note || '')}</td>
         <td class="right"><button class="btn sm danger" data-del-classroom="${esc(c.id)}">删除</button></td>
       </tr>`).join('')
-    : '<tr><td colspan="6" class="muted">暂无教室</td></tr>';
+    : '<tr><td colspan="7" class="muted">暂无教室</td></tr>';
 
   $('classroomTable').querySelectorAll('[data-del-classroom]').forEach(button => {
     button.onclick = async () => {
@@ -291,13 +389,20 @@ async function loadUsers() {
   const list = await api('/api/admin/users');
   const classroomMap = Object.fromEntries(classrooms.map(c => [c.id, c.name]));
 
+  const roleBadge = role => {
+    if (role === 'admin') return '<span class="badge on">全局管理员</span>';
+    if (role === 'org_admin') return '<span class="badge warn">组织管理员</span>';
+    return '<span class="badge">教师</span>';
+  };
+
   const body = $('userTable').querySelector('tbody');
   body.innerHTML = list.length
     ? list.map(u => `
       <tr>
         <td>${esc(u.username)}</td>
         <td>${esc(u.displayName || '—')}</td>
-        <td>${u.role === 'admin' ? '<span class="badge on">管理员</span>' : '<span class="badge">教师</span>'}</td>
+        <td>${roleBadge(u.role)}</td>
+        <td>${esc(u.organizationName || '—')}</td>
         <td>${esc((u.classroomIds || []).map(id => classroomMap[id] || id).join('、') || '—')}</td>
         <td>${u.enabled ? '正常' : '<span class="badge danger">已禁用</span>'}</td>
         <td class="nowrap">${fmtTime(u.lastLoginAt)}</td>
@@ -307,7 +412,7 @@ async function loadUsers() {
           <button class="btn sm danger" data-user-del="${esc(u.id)}">删除</button>
         </td>
       </tr>`).join('')
-    : '<tr><td colspan="7" class="muted">暂无账号</td></tr>';
+    : '<tr><td colspan="8" class="muted">暂无账号</td></tr>';
 
   body.querySelectorAll('[data-pass]').forEach(button => {
     button.onclick = async () => {
@@ -360,14 +465,16 @@ async function createUser() {
   const displayName = ($('newUserDisplay').value || '').trim();
   const role = $('newUserRole').value;
   const classroomIds = Array.from($('newUserClassrooms').selectedOptions).map(o => o.value);
+  const organizationId = $('newUserOrg') ? $('newUserOrg').value : '';
 
   if (username.length < 3) { toast('用户名至少 3 位', true); return; }
   if (password.length < 8) { toast('密码至少 8 位', true); return; }
+  if (role === 'org_admin' && !organizationId) { toast('组织管理员必须选择所属组织', true); return; }
 
   try {
     await api('/api/admin/users', {
       method: 'POST',
-      body: JSON.stringify({ username, password, displayName, role, classroomIds }),
+      body: JSON.stringify({ username, password, displayName, role, classroomIds, organizationId }),
     });
     toast('账号已创建');
     $('newUserName').value = '';
@@ -440,6 +547,7 @@ document.addEventListener('DOMContentLoaded', () => {
       try {
         if (name === 'overview') await loadOverview();
         if (name === 'devices') await loadDevices();
+        if (name === 'organizations') await loadOrganizations();
         if (name === 'classrooms') await loadClassrooms();
         if (name === 'users') { await loadClassrooms(); await loadUsers(); }
         if (name === 'audit') await loadAudit();
@@ -450,13 +558,19 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   $('createDeviceBtn').onclick = createDevice;
+  $('createOrgBtn').onclick = createOrganization;
   $('createClassroomBtn').onclick = async () => {
     const name = ($('newClassroomName').value || '').trim();
     if (!name) { toast('请填写教室名称', true); return; }
+    const organizationId = $('newClassroomOrg') ? $('newClassroomOrg').value : '';
     try {
       await api('/api/admin/classrooms', {
         method: 'POST',
-        body: JSON.stringify({ name, note: ($('newClassroomNote').value || '').trim() }),
+        body: JSON.stringify({
+          name,
+          note: ($('newClassroomNote').value || '').trim(),
+          organizationId,
+        }),
       });
       toast('教室已创建');
       $('newClassroomName').value = '';

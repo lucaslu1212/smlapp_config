@@ -43,6 +43,7 @@ COOKIE_NAME = "sml.auth"
 PBKDF2_ITERATIONS = 100_000
 
 ROLE_TEACHER = "teacher"
+ROLE_ORG_ADMIN = "org_admin"
 ROLE_ADMIN = "admin"
 
 DOWNSTREAM = {
@@ -147,6 +148,7 @@ def parse_cookies(header):
 
 class Store:
     FILES = {
+        "organizations": "organizations.json",
         "users": "users.json",
         "classrooms": "classrooms.json",
         "devices": "devices.json",
@@ -158,6 +160,7 @@ class Store:
     def __init__(self, data_dir, bootstrap):
         self.dir = data_dir
         self.bootstrap = bootstrap
+        self.organizations = []
         self.users = []
         self.classrooms = []
         self.devices = []
@@ -182,6 +185,7 @@ class Store:
                 "passwordHash": digest,
                 "passwordSalt": salt,
                 "role": ROLE_ADMIN,
+                "organizationId": "",
                 "classroomIds": [],
                 "enabled": True,
                 "createdAt": now_ms(),
@@ -190,14 +194,46 @@ class Store:
             created_admin = True
             changed = True
 
+        if not self.organizations:
+            self.organizations.append({
+                "id": "org-default",
+                "name": "默认组织",
+                "note": "首次启动自动创建，可在后台改名",
+                "createdAt": now_ms(),
+            })
+            changed = True
+
+        # 迁移：历史教室没有组织归属时，归入默认组织
+        for classroom in self.classrooms:
+            if not classroom.get("organizationId"):
+                classroom["organizationId"] = "org-default"
+                changed = True
+
         if not self.classrooms:
             self.classrooms.append({
                 "id": "cls-default",
                 "name": "默认教室",
                 "note": "首次启动自动创建，可在后台改名",
+                "organizationId": "org-default",
                 "createdAt": now_ms(),
             })
             changed = True
+
+        # 迁移：教师账号按第一个教室补组织归属
+        for user in self.users:
+            if user.get("role") == ROLE_TEACHER and not user.get("organizationId"):
+                first = next((c for c in self.classrooms if c["id"] in (user.get("classroomIds") or [])), None)
+                if first and first.get("organizationId"):
+                    user["organizationId"] = first["organizationId"]
+                    changed = True
+
+        # 迁移：设备按所属教室补组织归属
+        for device in self.devices:
+            if not device.get("organizationId"):
+                classroom = next((c for c in self.classrooms if c["id"] == device.get("classroomId")), None)
+                if classroom and classroom.get("organizationId"):
+                    device["organizationId"] = classroom["organizationId"]
+                    changed = True
 
         if changed:
             self.save()
@@ -217,9 +253,19 @@ class Store:
     def device(self, device_id):
         return next((d for d in self.devices if d["deviceId"] == device_id), None)
 
+    def organization(self, organization_id):
+        return next((o for o in self.organizations if o["id"] == organization_id), None)
+
+    def organization_name(self, organization_id):
+        org = self.organization(organization_id)
+        return org["name"] if org else organization_id
+
+    def classroom(self, classroom_id):
+        return next((c for c in self.classrooms if c["id"] == classroom_id), None)
+
     def classroom_name(self, classroom_id):
-        c = next((c for c in self.classrooms if c["id"] == classroom_id), None)
-        return c["name"] if c else classroom_id
+        classroom = self.classroom(classroom_id)
+        return classroom["name"] if classroom else classroom_id
 
     def otp(self, otp_id):
         return next((o for o in self.otps if o["otpId"] == otp_id), None)
@@ -815,16 +861,78 @@ def is_admin(user):
     return user and user.get("role") == ROLE_ADMIN
 
 
+def is_org_admin(user):
+    return user and user.get("role") == ROLE_ORG_ADMIN
+
+
 def can_access(user, device):
     if is_admin(user):
         return True
+    if is_org_admin(user):
+        return bool(user.get("organizationId")) and device.get("organizationId") == user["organizationId"]
     return bool(device.get("classroomId")) and device["classroomId"] in (user.get("classroomIds") or [])
 
 
-def resolve_scope(user, classroom_id):
+def can_see_otp(user, record, store):
+    if is_admin(user):
+        return True
+
+    classroom_id = record.get("classroomId") or ""
+    if is_org_admin(user):
+        if not classroom_id:
+            return False
+        classroom = store.classroom(classroom_id)
+        return bool(classroom) and classroom.get("organizationId") == user.get("organizationId")
+
+    return not classroom_id or classroom_id in (user.get("classroomIds") or [])
+
+
+def can_manage_classroom(actor, classroom, store):
+    if is_admin(actor):
+        return True
+    if not is_org_admin(actor):
+        return False
+    return bool(classroom) and classroom.get("organizationId") == actor.get("organizationId")
+
+
+def can_manage_user(actor, target, store):
+    if is_admin(actor):
+        return True
+    if not is_org_admin(actor):
+        return False
+
+    org = actor.get("organizationId") or ""
+    if not org:
+        return False
+
+    if target.get("organizationId") == org:
+        return True
+
+    org_rooms = {c["id"] for c in store.classrooms if c.get("organizationId") == org}
+    return bool(org_rooms & set(target.get("classroomIds") or []))
+
+
+def resolve_scope(user, classroom_id, store=None):
     cid = (classroom_id or "").strip()
+
     if is_admin(user):
         return cid, None
+
+    if is_org_admin(user):
+        org = user.get("organizationId") or ""
+        if not org:
+            return cid, "账号未分配组织"
+        if cid:
+            classroom = store.classroom(cid) if store else None
+            if not classroom or classroom.get("organizationId") != org:
+                return cid, "无权操作该教室"
+            return cid, None
+
+        rooms = [c for c in store.classrooms if c.get("organizationId") == org] if store else []
+        if len(rooms) == 1:
+            return rooms[0]["id"], None
+        return cid, "请指定教室"
+
     if cid:
         return (cid, None) if cid in (user.get("classroomIds") or []) else (cid, "无权操作该教室")
     if len(user.get("classroomIds") or []) == 1:
@@ -832,12 +940,15 @@ def resolve_scope(user, classroom_id):
     return cid, "请指定教室"
 
 
-def public_user(user):
+def public_user(user, store=None):
+    organization_id = user.get("organizationId") or ""
     return {
         "id": user["id"],
         "username": user["username"],
         "displayName": user.get("displayName") or user["username"],
         "role": user.get("role"),
+        "organizationId": organization_id,
+        "organizationName": store.organization_name(organization_id) if (store and organization_id) else "",
         "classroomIds": user.get("classroomIds") or [],
         "lastLoginAt": user.get("lastLoginAt", 0),
     }
@@ -964,13 +1075,18 @@ async def route(method, target, headers, body, ctx):
         return error_response("未登录", 401)
 
     if path == "/api/auth/me" and method == "GET":
-        return json_response(public_user(user))
+        return json_response(public_user(user, store))
 
     store = ctx.store
 
     # ---- 教师端：教室与设备 ----
     if path == "/api/classrooms" and method == "GET":
-        items = [c for c in store.classrooms if is_admin(user) or c["id"] in (user.get("classroomIds") or [])]
+        if is_admin(user):
+            items = store.classrooms
+        elif is_org_admin(user):
+            items = [c for c in store.classrooms if c.get("organizationId") == user.get("organizationId")]
+        else:
+            items = [c for c in store.classrooms if c["id"] in (user.get("classroomIds") or [])]
         return json_response(items)
 
     if path == "/api/devices" and method == "GET":
@@ -1016,7 +1132,7 @@ async def route(method, target, headers, body, ctx):
 
     # ---- 一次性密码 ----
     if path == "/api/otp" and method == "GET":
-        scope, error = resolve_scope(user, query.get("classroomId"))
+        scope, error = resolve_scope(user, query.get("classroomId"), store)
         if error:
             return error_response(error)
         device_id = query.get("deviceId", "")
@@ -1027,7 +1143,7 @@ async def route(method, target, headers, body, ctx):
                 continue
             if scope and record.get("classroomId") and record["classroomId"] != scope:
                 continue
-            if not is_admin(user) and record.get("classroomId") and record["classroomId"] not in (user.get("classroomIds") or []):
+            if not can_see_otp(user, record, store):
                 continue
             if active_only and not otp_available(record):
                 continue
@@ -1043,7 +1159,7 @@ async def route(method, target, headers, body, ctx):
         record = store.otp(match.group(1))
         if not record:
             return error_response("不存在", 404)
-        if not is_admin(user) and record.get("classroomId") not in (user.get("classroomIds") or []):
+        if not can_see_otp(user, record, store):
             return error_response("无权操作", 403)
         record["revoked"] = True
         record["revokedAt"] = now_ms()
@@ -1056,8 +1172,7 @@ async def route(method, target, headers, body, ctx):
         limit = max(1, min(500, int(query.get("limit", "100"))))
         items = [u for u in store.otp_usages if not device_id or u["deviceId"] == device_id]
         if not is_admin(user):
-            allowed = {d["deviceId"] for d in store.devices
-                       if d.get("classroomId") in (user.get("classroomIds") or [])}
+            allowed = {d["deviceId"] for d in store.devices if can_access(user, d)}
             items = [u for u in items if u["deviceId"] in allowed]
         items.sort(key=lambda u: u["at"], reverse=True)
         return json_response(items[:limit])
@@ -1085,17 +1200,145 @@ async def route(method, target, headers, body, ctx):
         return await handle_approval(match.group(1), match.group(2) == "approve", body, user, ctx)
 
     # ---- 后台 ----
-    if path.startswith("/api/admin/") and not is_admin(user):
+    if path.startswith("/api/admin/") and not (is_admin(user) or is_org_admin(user)):
         return error_response("需要管理员权限", 403)
 
-    if path == "/api/admin/overview" and method == "GET":
-        available = sum(1 for o in store.otps if otp_available(o))
-        pending = sum(1 for a in store.approvals if a["status"] == "pending")
+    # ---- 组织（仅全局 admin） ----
+    if path == "/api/admin/organizations" and method == "GET":
+        if not is_admin(user):
+            return error_response("需要全局管理员权限", 403)
+
+        items = []
+        for org in store.organizations:
+            rooms = [c for c in store.classrooms if c.get("organizationId") == org["id"]]
+            devices = [d for d in store.devices if d.get("organizationId") == org["id"]]
+            members = [u for u in store.users if u.get("organizationId") == org["id"]]
+            items.append({
+                **org,
+                "classroomCount": len(rooms),
+                "deviceCount": len(devices),
+                "onlineCount": sum(1 for d in devices if ctx.connections.online(d["deviceId"])),
+                "userCount": len(members),
+            })
+        return json_response(items)
+
+    if path == "/api/admin/organizations" and method == "POST":
+        if not is_admin(user):
+            return error_response("需要全局管理员权限", 403)
+
+        payload = parse_body(body)
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            return error_response("请填写组织名称")
+
+        admin_username = str(payload.get("adminUsername") or "").strip()
+        admin_password = str(payload.get("adminPassword") or "")
+
+        if admin_password and len(admin_password) < 8:
+            return error_response("管理员密码至少 8 位")
+        if admin_username and store.user_by_name(admin_username):
+            return error_response("管理员用户名已存在")
+
+        org_id = "org-" + secrets.token_hex(3)
+
+        if not admin_username:
+            base = "org_" + org_id.split("-")[-1]
+            admin_username = base
+            suffix = 1
+            while store.user_by_name(admin_username):
+                suffix += 1
+                admin_username = f"{base}{suffix}"
+
+        if not admin_password:
+            admin_password = secrets.token_urlsafe(9)[:10]
+
+        digest, salt = hash_password(admin_password)
+        account = {
+            "id": secrets.token_hex(6),
+            "username": admin_username,
+            "displayName": name + "管理员",
+            "passwordHash": digest,
+            "passwordSalt": salt,
+            "role": ROLE_ORG_ADMIN,
+            "organizationId": org_id,
+            "classroomIds": [],
+            "enabled": True,
+            "createdAt": now_ms(),
+            "lastLoginAt": 0,
+        }
+
+        organization = {
+            "id": org_id,
+            "name": name,
+            "note": payload.get("note") or "",
+            "createdAt": now_ms(),
+        }
+
+        store.organizations.append(organization)
+        store.users.append(account)
+        store.save()
+
+        ctx.audit.write(user["username"], user.get("role"), "organization.create", org_id,
+                        f"创建组织 {name}，管理员 {admin_username}", "")
+
         return json_response({
-            "onlineDevices": ctx.connections.online_count(),
-            "totalDevices": len(store.devices),
-            "users": len(store.users),
-            "classrooms": len(store.classrooms),
+            "organization": organization,
+            "admin": {"username": admin_username, "password": admin_password},
+            "message": "管理员密码只显示这一次，请转告并尽快修改",
+        })
+
+    match = re.fullmatch(r"/api/admin/organizations/([^/]+)", path)
+    if match and method == "PATCH":
+        if not is_admin(user):
+            return error_response("需要全局管理员权限", 403)
+        payload = parse_body(body)
+        org = store.organization(match.group(1))
+        if not org:
+            return error_response("组织不存在", 404)
+        if payload.get("name"):
+            org["name"] = str(payload["name"]).strip()
+        if "note" in payload:
+            org["note"] = payload.get("note") or ""
+        store.save()
+        return json_response({"ok": True})
+
+    if match and method == "DELETE":
+        if not is_admin(user):
+            return error_response("需要全局管理员权限", 403)
+        org_id = match.group(1)
+        org = store.organization(org_id)
+        if not org:
+            return error_response("组织不存在", 404)
+        if any(c.get("organizationId") == org_id for c in store.classrooms):
+            return error_response("该组织下还有教室，请先删除教室")
+        if any(u.get("organizationId") == org_id for u in store.users):
+            return error_response("该组织下还有账号，请先删除账号")
+        store.organizations = [o for o in store.organizations if o is not org]
+        store.save()
+        return json_response({"ok": True})
+
+    # ---- 总览 ----
+    if path == "/api/admin/overview" and method == "GET":
+        if is_admin(user):
+            scope_devices = store.devices
+            scope_classrooms = store.classrooms
+            scope_users = store.users
+        else:
+            scope_devices = [d for d in store.devices if d.get("organizationId") == user.get("organizationId")]
+            scope_classrooms = [c for c in store.classrooms if c.get("organizationId") == user.get("organizationId")]
+            scope_users = [u for u in store.users if u.get("organizationId") == user.get("organizationId")]
+
+        scope_device_ids = {d["deviceId"] for d in scope_devices}
+        available = sum(1 for o in store.otps if otp_available(o) and can_see_otp(user, o, store))
+        pending = sum(1 for a in store.approvals
+                      if a["status"] == "pending" and a["deviceId"] in scope_device_ids)
+
+        return json_response({
+            "onlineDevices": sum(1 for d in scope_devices if ctx.connections.online(d["deviceId"])),
+            "totalDevices": len(scope_devices),
+            "users": len(scope_users),
+            "classrooms": len(scope_classrooms),
+            "organizations": len(store.organizations) if is_admin(user) else 1,
             "pendingApprovals": pending,
             "availableOtp": available,
             "httpsPort": ctx.config["httpsPort"],
@@ -1113,10 +1356,14 @@ async def route(method, target, headers, body, ctx):
         })
 
     if path == "/api/admin/devices" and method == "GET":
-        items = sorted(store.devices, key=lambda d: (d.get("name") or "").lower())
+        items = [d for d in store.devices
+                 if is_admin(user) or d.get("organizationId") == user.get("organizationId")]
+        items.sort(key=lambda d: (d.get("name") or "").lower())
         return json_response([{
             "deviceId": d["deviceId"],
             "name": d.get("name", ""),
+            "organizationId": d.get("organizationId", ""),
+            "organizationName": store.organization_name(d.get("organizationId", "")) if d.get("organizationId") else "",
             "classroomId": d.get("classroomId", ""),
             "classroomName": store.classroom_name(d.get("classroomId", "")),
             "enabled": d.get("enabled", True),
@@ -1135,7 +1382,7 @@ async def route(method, target, headers, body, ctx):
     match = re.fullmatch(r"/api/admin/devices/([^/]+)/token", path)
     if match and method == "POST":
         device = store.device(match.group(1))
-        if not device:
+        if not device or not can_access(user, device):
             return error_response("设备不存在", 404)
         token = new_token()
         device["tokenHash"] = token_hash(token)
@@ -1148,7 +1395,7 @@ async def route(method, target, headers, body, ctx):
     match = re.fullmatch(r"/api/admin/devices/([^/]+)/kick", path)
     if match and method == "POST":
         device = store.device(match.group(1))
-        if not device:
+        if not device or not can_access(user, device):
             return error_response("设备不存在", 404)
         payload = parse_body(body)
         reason = payload.get("reason") or "管理员下线"
@@ -1166,15 +1413,19 @@ async def route(method, target, headers, body, ctx):
     if match and method == "PATCH":
         payload = parse_body(body)
         device = store.device(match.group(1))
-        if not device:
+        if not device or not can_access(user, device):
             return error_response("设备不存在", 404)
         if payload.get("name"):
             device["name"] = str(payload["name"]).strip()
         if payload.get("classroomId"):
             cid = str(payload["classroomId"]).strip()
-            if not any(c["id"] == cid for c in store.classrooms):
+            classroom = store.classroom(cid)
+            if not classroom:
                 return error_response("教室不存在")
+            if not can_manage_classroom(user, classroom, store):
+                return error_response("无权操作该教室", 403)
             device["classroomId"] = cid
+            device["organizationId"] = classroom.get("organizationId", "")
         if "enabled" in payload:
             device["enabled"] = bool(payload["enabled"])
         store.save()
@@ -1182,18 +1433,27 @@ async def route(method, target, headers, body, ctx):
 
     if match and method == "DELETE":
         device = store.device(match.group(1))
-        if not device:
+        if not device or not can_access(user, device):
             return error_response("设备不存在", 404)
         store.devices = [d for d in store.devices if d is not device]
         store.save()
         return json_response({"ok": True})
 
     if path == "/api/admin/classrooms" and method == "GET":
+        if is_admin(user):
+            scope_rooms = store.classrooms
+        else:
+            scope_rooms = [c for c in store.classrooms if c.get("organizationId") == user.get("organizationId")]
+
         items = []
-        for c in store.classrooms:
+        for c in scope_rooms:
             devices = [d for d in store.devices if d.get("classroomId") == c["id"]]
-            items.append({**c, "deviceCount": len(devices),
-                          "onlineCount": sum(1 for d in devices if ctx.connections.online(d["deviceId"]))})
+            items.append({
+                **c,
+                "organizationName": store.organization_name(c.get("organizationId", "")) if c.get("organizationId") else "",
+                "deviceCount": len(devices),
+                "onlineCount": sum(1 for d in devices if ctx.connections.online(d["deviceId"])),
+            })
         return json_response(items)
 
     if path == "/api/admin/classrooms" and method == "POST":
@@ -1201,8 +1461,27 @@ async def route(method, target, headers, body, ctx):
         name = str(payload.get("name") or "").strip()
         if not name:
             return error_response("请填写教室名称")
-        record = {"id": "cls-" + secrets.token_hex(3), "name": name,
-                  "note": payload.get("note") or "", "createdAt": now_ms()}
+
+        organization_id = str(payload.get("organizationId") or "").strip()
+        if is_org_admin(user):
+            if organization_id and organization_id != user.get("organizationId"):
+                return error_response("无权操作该组织", 403)
+            organization_id = user.get("organizationId") or ""
+        if not organization_id:
+            organization_id = store.organizations[0]["id"] if store.organizations else ""
+
+        if not store.organization(organization_id):
+            return error_response("组织不存在")
+        if not is_admin(user) and organization_id != user.get("organizationId"):
+            return error_response("无权操作该组织", 403)
+
+        record = {
+            "id": "cls-" + secrets.token_hex(3),
+            "name": name,
+            "note": payload.get("note") or "",
+            "organizationId": organization_id,
+            "createdAt": now_ms(),
+        }
         store.classrooms.append(record)
         store.save()
         return json_response(record)
@@ -1210,45 +1489,82 @@ async def route(method, target, headers, body, ctx):
     match = re.fullmatch(r"/api/admin/classrooms/([^/]+)", path)
     if match and method == "DELETE":
         cid = match.group(1)
+        classroom = store.classroom(cid)
+        if not classroom or not can_manage_classroom(user, classroom, store):
+            return error_response("教室不存在", 404)
         if any(d.get("classroomId") == cid for d in store.devices):
             return error_response("该教室下还有设备，请先迁移或删除设备")
-        classroom = next((c for c in store.classrooms if c["id"] == cid), None)
-        if not classroom:
-            return error_response("教室不存在", 404)
         store.classrooms = [c for c in store.classrooms if c is not classroom]
         store.save()
         return json_response({"ok": True})
 
     if path == "/api/admin/users" and method == "GET":
+        items = [u for u in store.users if can_manage_user(user, u, store)]
         return json_response([{
             "id": u["id"], "username": u["username"], "displayName": u.get("displayName", ""),
-            "role": u.get("role"), "classroomIds": u.get("classroomIds") or [],
+            "role": u.get("role"),
+            "organizationId": u.get("organizationId", ""),
+            "organizationName": store.organization_name(u.get("organizationId", "")) if u.get("organizationId") else "",
+            "classroomIds": u.get("classroomIds") or [],
             "enabled": u.get("enabled", True), "createdAt": u.get("createdAt", 0),
             "lastLoginAt": u.get("lastLoginAt", 0),
-        } for u in store.users])
+        } for u in items])
 
     if path == "/api/admin/users" and method == "POST":
         payload = parse_body(body)
         username = str(payload.get("username") or "").strip()
         password = str(payload.get("password") or "")
-        role = ROLE_ADMIN if payload.get("role") == ROLE_ADMIN else ROLE_TEACHER
+
+        if is_admin(user):
+            requested = payload.get("role")
+            role = requested if requested in (ROLE_ADMIN, ROLE_ORG_ADMIN, ROLE_TEACHER) else ROLE_TEACHER
+        else:
+            role = ROLE_TEACHER
+
         if len(username) < 3:
             return error_response("用户名至少 3 位")
         if len(password) < 8:
             return error_response("密码至少 8 位")
         if store.user_by_name(username):
             return error_response("用户名已存在")
+
+        organization_id = str(payload.get("organizationId") or "").strip()
+        if is_org_admin(user):
+            if organization_id and organization_id != user.get("organizationId"):
+                return error_response("无权操作该组织", 403)
+            organization_id = user.get("organizationId") or ""
+        if role == ROLE_ADMIN:
+            organization_id = ""
+        if role == ROLE_ORG_ADMIN and not organization_id:
+            return error_response("组织管理员必须归属一个组织")
+        if organization_id and not store.organization(organization_id):
+            return error_response("组织不存在")
+        if not is_admin(user) and organization_id != user.get("organizationId"):
+            return error_response("无权操作该组织", 403)
+
+        classroom_ids = list(dict.fromkeys(payload.get("classroomIds") or []))
+        if role == ROLE_ADMIN:
+            classroom_ids = []
+        if classroom_ids:
+            if is_org_admin(user):
+                allowed_rooms = {c["id"] for c in store.classrooms if c.get("organizationId") == organization_id}
+                if not set(classroom_ids).issubset(allowed_rooms):
+                    return error_response("只能选择本组织的教室", 403)
+            elif not all(store.classroom(cid) for cid in classroom_ids):
+                return error_response("教室不存在")
+
         digest, salt = hash_password(password)
         record = {
             "id": secrets.token_hex(6), "username": username,
             "displayName": str(payload.get("displayName") or username).strip(),
             "passwordHash": digest, "passwordSalt": salt, "role": role,
-            "classroomIds": [] if role == ROLE_ADMIN else list(payload.get("classroomIds") or []),
+            "organizationId": organization_id,
+            "classroomIds": classroom_ids,
             "enabled": True, "createdAt": now_ms(), "lastLoginAt": 0,
         }
         store.users.append(record)
         store.save()
-        return json_response({k: record[k] for k in ("id", "username", "displayName", "role")})
+        return json_response({k: record[k] for k in ("id", "username", "displayName", "role", "organizationId")})
 
     match = re.fullmatch(r"/api/admin/users/([^/]+)/password", path)
     if match and method == "POST":
@@ -1257,8 +1573,10 @@ async def route(method, target, headers, body, ctx):
         if len(password) < 8:
             return error_response("密码至少 8 位")
         target = store.user(match.group(1))
-        if not target:
+        if not target or not can_manage_user(user, target, store):
             return error_response("账号不存在", 404)
+        if is_org_admin(user) and target.get("role") != ROLE_TEACHER:
+            return error_response("组织管理员只能维护教师账号", 403)
         digest, salt = hash_password(password)
         target["passwordHash"] = digest
         target["passwordSalt"] = salt
@@ -1269,16 +1587,39 @@ async def route(method, target, headers, body, ctx):
     if match and method == "PATCH":
         payload = parse_body(body)
         target = store.user(match.group(1))
-        if not target:
+        if not target or not can_manage_user(user, target, store):
             return error_response("账号不存在", 404)
+        if is_org_admin(user) and target.get("role") != ROLE_TEACHER:
+            return error_response("组织管理员只能维护教师账号", 403)
+
         if payload.get("displayName"):
             target["displayName"] = str(payload["displayName"]).strip()
-        if payload.get("role") in (ROLE_ADMIN, ROLE_TEACHER):
+
+        if payload.get("role") in (ROLE_ADMIN, ROLE_ORG_ADMIN, ROLE_TEACHER):
+            if is_org_admin(user):
+                return error_response("无权修改角色", 403)
             target["role"] = payload["role"]
+
+        if payload.get("organizationId") is not None and is_admin(user):
+            org_id = str(payload.get("organizationId") or "").strip()
+            if org_id and not store.organization(org_id):
+                return error_response("组织不存在")
+            target["organizationId"] = org_id
+
         if isinstance(payload.get("classroomIds"), list):
-            target["classroomIds"] = list(dict.fromkeys(payload["classroomIds"]))
+            classroom_ids = list(dict.fromkeys(payload["classroomIds"]))
+            if is_org_admin(user):
+                allowed_rooms = {c["id"] for c in store.classrooms
+                                 if c.get("organizationId") == user.get("organizationId")}
+                if not set(classroom_ids).issubset(allowed_rooms):
+                    return error_response("只能选择本组织的教室", 403)
+            elif not all(store.classroom(cid) for cid in classroom_ids):
+                return error_response("教室不存在")
+            target["classroomIds"] = classroom_ids
+
         if "enabled" in payload:
             target["enabled"] = bool(payload["enabled"])
+
         store.save()
         return json_response({"ok": True})
 
@@ -1286,8 +1627,10 @@ async def route(method, target, headers, body, ctx):
         if match.group(1) == user["id"]:
             return error_response("不能删除当前登录账号")
         target = store.user(match.group(1))
-        if not target:
+        if not target or not can_manage_user(user, target, store):
             return error_response("账号不存在", 404)
+        if is_org_admin(user) and target.get("role") != ROLE_TEACHER:
+            return error_response("组织管理员只能维护教师账号", 403)
         store.users = [u for u in store.users if u is not target]
         store.save()
         return json_response({"ok": True})
@@ -1301,7 +1644,12 @@ async def route(method, target, headers, body, ctx):
             except ValueError:
                 pass
         limit = max(1, min(1000, int(query.get("limit", "200"))))
-        return json_response(ctx.audit.read(day, limit))
+        entries = ctx.audit.read(day, limit)
+        if not is_admin(user):
+            allowed_names = {u["username"] for u in store.users
+                             if u.get("organizationId") == user.get("organizationId")}
+            entries = [e for e in entries if e.get("actor") in allowed_names]
+        return json_response(entries)
 
     return error_response("not found", 404)
 
@@ -1336,7 +1684,7 @@ def handle_login(body, ctx, headers):
     ctx.store.save()
     ctx.audit.write(user["username"], user.get("role"), "auth.login", user["username"], None, ip)
 
-    return 200, "application/json; charset=utf-8", dumps({**public_user(user), "token": token}), [
+    return 200, "application/json; charset=utf-8", dumps({**public_user(user, ctx.store), "token": token}), [
         ("Set-Cookie", f"{COOKIE_NAME}={token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800")
     ]
 
@@ -1406,7 +1754,7 @@ def otp_dto(record):
 
 async def handle_create_otp(body, user, ctx):
     payload = parse_body(body)
-    scope, error = resolve_scope(user, payload.get("classroomId"))
+    scope, error = resolve_scope(user, payload.get("classroomId"), ctx.store)
     if error:
         return error_response(error)
 
@@ -1519,14 +1867,19 @@ def handle_create_device(body, user, ctx):
         return error_response("请填写设备名称")
     if not classroom_id:
         return error_response("请选择教室")
-    if not any(c["id"] == classroom_id for c in ctx.store.classrooms):
+
+    classroom = ctx.store.classroom(classroom_id)
+    if not classroom:
         return error_response("教室不存在")
+    if not can_manage_classroom(user, classroom, ctx.store):
+        return error_response("无权操作该教室", 403)
 
     device_id = secrets.token_hex(16)
     token = new_token()
     record = {
         "deviceId": device_id,
         "name": name,
+        "organizationId": classroom.get("organizationId", ""),
         "classroomId": classroom_id,
         "tokenHash": token_hash(token),
         "tokenHint": token[:6] + "…",

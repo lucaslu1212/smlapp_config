@@ -79,8 +79,9 @@ function showLogin() {
 function showApp() {
   $('login').hidden = true;
   $('app').hidden = false;
-  const role = me.role === 'admin' ? '管理员' : '教师';
-  $('currentUser').textContent = `${me.displayName} · ${role}`;
+  const role = me.role === 'admin' ? '管理员' : me.role === 'org_admin' ? '组织管理员' : '教师';
+  const org = me.role !== 'admin' && me.organizationName ? ` · ${me.organizationName}` : '';
+  $('currentUser').textContent = `${me.displayName} · ${role}${org}`;
 }
 
 async function boot() {
