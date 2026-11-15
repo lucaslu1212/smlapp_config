@@ -16,6 +16,13 @@
 
 * { box-sizing: border-box; }
 
+/* hidden 属性兜底。
+   浏览器默认的 [hidden]{display:none} 属于 UA 样式，会被作者样式里的
+   display（.login-wrap 的 grid、.layout 的 grid、.badge 的 inline-flex）
+   覆盖，导致 el.hidden = true 完全失效（登录框关不掉、退出后界面不消失）。
+   这条必须保留 !important，否则又会被子选择器更大的规则压回去。 */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   height: 100%;

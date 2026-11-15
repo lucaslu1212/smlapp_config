@@ -839,7 +839,8 @@ STATIC_TYPES = {
 
 def serve_static(path):
     name = "index.html" if path in ("/", "") else path.lstrip("/")
-    if name == "admin":
+    # 后台入口统一到 admin.html：/admin、/admin/、/admin/index.html 都算
+    if name.rstrip("/") in ("admin", "admin/index.html"):
         name = "admin.html"
     full = os.path.realpath(os.path.join(STATIC_DIR, name))
     if not full.startswith(os.path.realpath(STATIC_DIR) + os.sep) or not os.path.isfile(full):
